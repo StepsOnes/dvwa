@@ -1,0 +1,76 @@
+stages:
+  - build
+  - snyk_scan
+  - deploy
+  - zap_scan
+
+variables:
+  DOCKER_DRIVER: overlay2
+  SNYK_TOKEN: $SNYK_TOKEN
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - echo "Building Docker image..."
+    - docker version
+    - docker build --tag mohamedfourti/dvwa:$CI_COMMIT_REF_NAME -f Dockerfile .
+    - docker push mohamedfourti/dvwa:$CI_COMMIT_REF_NAME
+  tags:
+    - manager
+  artifacts:
+    paths:
+      - docker-image/
+
+snyk_scan:
+  stage: snyk_scan
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Running Snyk vulnerability scan..."
+    - docker run -d --name snyk-container -v /var/run/docker.sock:/var/run/docker.sock snyk/snyk:docker sleep infinity
+    - docker exec snyk-container snyk auth $SNYK_TOKEN
+    - docker exec snyk-container snyk test --docker mohamedfourti/dvwa:$CI_COMMIT_REF_NAME --json > snyk_report.json || true
+    - docker stop snyk-container
+    - docker rm snyk-container
+  tags:
+    - manager
+  artifacts:
+    paths:
+      - snyk_report.json
+
+
+deploy:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - echo "Deploying services using docker-compose..."
+    - docker pull mohamedfourti/dvwa:$CI_COMMIT_REF_NAME
+    - docker stack deploy -c compose.yml $CI_PROJECT_NAME
+  tags:
+    - manager
+
+zap_scan:
+  stage: zap_scan
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Running OWASP ZAP security scan..."
+    - docker run --name zap -p 8090:8090 -i softwaresecurityproject/zap-bare zap.sh -cmd -port 8090 -quickurl http://192.168.246.136:4280 -quickout /zap/zap-report.html
+    - docker cp zap:/zap/zap-report.html $CI_PROJECT_DIR/zap-report.html
+    - docker rm -f zap
+  tags:
+    - manager
+  artifacts:
+    paths:
+      - zap-report.html
